@@ -17,7 +17,8 @@ object DownloadHelper {
         title: String = "Video",
         cookies: String? = null,
         userAgent: String? = null,
-        mimeType: String? = null
+        mimeType: String? = null,
+        referer: String? = null
     ): Long {
         Log.d("DownloadHelper", "Enqueueing download for URL: $url")
         try {
@@ -63,10 +64,14 @@ object DownloadHelper {
             val finalUserAgent = if (userAgent.isNullOrEmpty()) DEFAULT_USER_AGENT else userAgent
             request.addRequestHeader("User-Agent", finalUserAgent)
             
-            // Add Referer if it's a known site
-            val domain = uri.host
-            if (domain != null) {
-                request.addRequestHeader("Referer", "https://$domain/")
+            // Add Referer if provided or guess it
+            if (!referer.isNullOrEmpty()) {
+                request.addRequestHeader("Referer", referer)
+            } else {
+                val domain = uri.host
+                if (domain != null) {
+                    request.addRequestHeader("Referer", "https://$domain/")
+                }
             }
 
             val id = downloadManager.enqueue(request)

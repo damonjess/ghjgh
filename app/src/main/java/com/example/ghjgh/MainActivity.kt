@@ -254,12 +254,63 @@ class MainActivity : AppCompatActivity() {
             Log.d("Downloader", "Resolved URL: $resolvedUrl")
             
             runOnUiThread {
-                val isWebViewSite = resolvedUrl.contains("pornhub.com") || 
-                                   resolvedUrl.contains("tiktok.com") || 
-                                   resolvedUrl.contains("douyin.com") ||
-                                   resolvedUrl.contains("instagram.com/reels")
+                val isTikTok = resolvedUrl.contains("tiktok.com")
+                val isHls = resolvedUrl.contains(".m3u8")
+                val isWebViewFallbackSite = resolvedUrl.contains("pornhub.com") || 
+                                           resolvedUrl.contains("douyin.com") ||
+                                           resolvedUrl.contains("instagram.com/reels")
 
-                if (isWebViewSite) {
+                if (isHls) {
+                    tvStatus.text = "HLS stream detected — downloading segments..."
+                    lifecycleScope.launch {
+                        val success = HlsDownloader.download(
+                            context = this@MainActivity,
+                            playlistUrl = resolvedUrl,
+                            referer = resolvedUrl,
+                            userAgent = userAgentString,
+                            title = "video",
+                            listener = { message ->
+                                runOnUiThread { tvStatus.text = message }
+                            }
+                        )
+                        runOnUiThread {
+                            if (success) {
+                                // Downloader already set the final path message
+                            } else if (!tvStatus.text.contains("Error:")) {
+                                tvStatus.text = "HLS download failed — check Logcat"
+                            }
+                            btnDownload.isEnabled = true
+                        }
+                    }
+                    return@runOnUiThread
+                }
+
+                if (isTikTok) {
+                    tvStatus.text = "Fetching video details..."
+                    lifecycleScope.launch {
+                        val result = TikTokExtractor.extract(resolvedUrl)
+                        runOnUiThread {
+                            if (result != null) {
+                                downloadId = DownloadHelper.enqueueDownload(
+                                    this@MainActivity,
+                                    result.url,
+                                    result.title,
+                                    null,
+                                    userAgentString,
+                                    "video/mp4",
+                                    TikTokExtractor.REFERER
+                                )
+                                tvStatus.text = "Download started"
+                            } else {
+                                Log.d("Downloader", "TikTok JSON extraction failed, trying WebView fallback")
+                                extractWithWebView(resolvedUrl)
+                            }
+                        }
+                    }
+                    return@runOnUiThread
+                }
+
+                if (isWebViewFallbackSite) {
                     Log.d("Downloader", "Using WebView extraction for $resolvedUrl")
                     extractWithWebView(resolvedUrl)
                     return@runOnUiThread
@@ -393,18 +444,41 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         if (!btnDownload.isEnabled) {
                             Log.d("WebViewDetect", "MATCHED VIDEO: $url")
-                            tvStatus.text = "Video detected!"
-                            val cookies = android.webkit.CookieManager.getInstance().getCookie(url)
-                            downloadId = DownloadHelper.enqueueDownload(
-                                this@MainActivity, 
-                                url, 
-                                "Downloaded Video", 
-                                cookies, 
-                                userAgentString,
-                                null
-                            )
-                            btnDownload.isEnabled = true
                             hiddenWebView.stopLoading()
+
+                            if (url.contains(".m3u8")) {
+                                tvStatus.text = "HLS stream detected — downloading segments..."
+                                val pageReferer = hiddenWebView.url ?: url
+
+                                lifecycleScope.launch {
+                                    val success = HlsDownloader.download(
+                                        context = this@MainActivity,
+                                        playlistUrl = url,
+                                        referer = pageReferer,
+                                        userAgent = userAgentString,
+                                        title = "video",
+                                        listener = { message ->
+                                            runOnUiThread { tvStatus.text = message }
+                                        }
+                                    )
+                                    runOnUiThread {
+                                        tvStatus.text = if (success) "Download complete" else "HLS download failed — check Logcat"
+                                        btnDownload.isEnabled = true
+                                    }
+                                }
+                            } else {
+                                tvStatus.text = "Video detected!"
+                                val cookies = android.webkit.CookieManager.getInstance().getCookie(url)
+                                downloadId = DownloadHelper.enqueueDownload(
+                                    this@MainActivity,
+                                    url,
+                                    "Downloaded Video",
+                                    cookies,
+                                    userAgentString,
+                                    null
+                                )
+                                btnDownload.isEnabled = true
+                            }
                         }
                     }
                 }
