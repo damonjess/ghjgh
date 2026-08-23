@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.util.Log
 import android.view.View
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -44,8 +45,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var fabDetect: FloatingActionButton
     private lateinit var hiddenWebView: WebView
+
+    private val userAgentString = "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
     
     private var downloadId: Long = -1
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (!isGranted) {
+            Toast.makeText(this, "Notification permission denied. You won't see download progress.", Toast.LENGTH_LONG).show()
+        }
+    }
 
     private val prefs by lazy { getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
 
@@ -126,6 +137,16 @@ class MainActivity : AppCompatActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(onDownloadComplete, filter)
         }
+
+        checkNotificationPermission()
+    }
+
+    private fun checkNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     private fun startFloatingService() {
@@ -187,10 +208,11 @@ class MainActivity : AppCompatActivity() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val item = clipboard.primaryClip?.getItemAt(0)
         val text = item?.text?.toString() ?: ""
+        val url = extractUrl(text)
 
-        if (text.startsWith("http")) {
-            etUrl.setText(text)
-            extractAndDownload(text)
+        if (url != null) {
+            etUrl.setText(url)
+            extractAndDownload(url)
         } else {
             Toast.makeText(this, "No valid link found in clipboard", Toast.LENGTH_SHORT).show()
         }
@@ -200,89 +222,188 @@ class MainActivity : AppCompatActivity() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val item = clipboard.primaryClip?.getItemAt(0)
         val text = item?.text?.toString() ?: ""
+        val url = extractUrl(text)
         
-        if (text.contains("instagram.com") || text.contains("facebook.com")) {
+        if (url != null && (url.contains("instagram.com") || url.contains("facebook.com") || url.contains("tiktok.com"))) {
             val rootView = findViewById<View>(android.R.id.content)
             Snackbar.make(rootView, "Link detected in clipboard", Snackbar.LENGTH_LONG)
                 .setAction("Download") {
-                    etUrl.setText(text)
-                    extractAndDownload(text)
+                    etUrl.setText(url)
+                    extractAndDownload(url)
                 }.show()
         }
     }
 
+    private fun extractUrl(text: String): String? {
+        val urlPattern = "(https?://[\\w\\-]+(\\.[\\w\\-]+)+[\\w\\-.,@?^=%&:/~+#]*[\\w\\-@?^=%&/~+#])".toRegex()
+        return urlPattern.find(text)?.value
+    }
+
     private fun extractAndDownload(url: String) {
+        var finalUrl = url.trim()
+        if (!finalUrl.startsWith("http")) {
+            finalUrl = "https://$finalUrl"
+        }
+
+        Log.d("Downloader", "Starting extraction for: $finalUrl")
         tvStatus.text = "Fetching video details..."
         btnDownload.isEnabled = false
 
-        if (url.contains("pornhub.com")) {
-            extractPornhubVideo(url)
-            return
-        }
+        lifecycleScope.launch {
+            val resolvedUrl = resolveRedirects(finalUrl)
+            Log.d("Downloader", "Resolved URL: $resolvedUrl")
+            
+            runOnUiThread {
+                val isWebViewSite = resolvedUrl.contains("pornhub.com") || 
+                                   resolvedUrl.contains("tiktok.com") || 
+                                   resolvedUrl.contains("douyin.com") ||
+                                   resolvedUrl.contains("instagram.com/reels")
 
-        val extractor = Extractor.findExtractor(url)
-        if (extractor != null) {
-            // Apply cookies if it's Instagram
-            if (url.contains("instagram.com")) {
-                val savedCookies = prefs.getString("ig_cookies", "")
-                if (!savedCookies.isNullOrEmpty()) {
-                    extractor.cookies = savedCookies
+                if (isWebViewSite) {
+                    Log.d("Downloader", "Using WebView extraction for $resolvedUrl")
+                    extractWithWebView(resolvedUrl)
+                    return@runOnUiThread
                 }
-            }
 
-            lifecycleScope.launch {
-                extractor.start { result ->
-                    runOnUiThread {
-                        when (result) {
-                            is Result.Success -> {
-                                val mediaList = result.formats
-                                if (mediaList.isNotEmpty()) {
-                                    val videoUrl = mediaList[0].url
-                                    DownloadHelper.enqueueDownload(this@MainActivity, videoUrl, mediaList[0].title)
-                                } else {
-                                    tvStatus.text = "Error: No video found at this link"
-                                    btnDownload.isEnabled = true
+                val extractor = Extractor.findExtractor(resolvedUrl)
+                if (extractor != null) {
+                    Log.d("Downloader", "Found extractor for $resolvedUrl")
+                    if (resolvedUrl.contains("instagram.com")) {
+                        val savedCookies = prefs.getString("ig_cookies", "")
+                        if (!savedCookies.isNullOrEmpty()) {
+                            extractor.cookies = savedCookies
+                        }
+                    }
+
+                    lifecycleScope.launch {
+                        extractor.start { result ->
+                            runOnUiThread {
+                                when (result) {
+                                    is Result.Success -> {
+                                        val mediaList = result.formats
+                                        Log.d("Downloader", "Extraction success, found ${mediaList.size} formats")
+                                        if (mediaList.isNotEmpty()) {
+                                            val format = mediaList[0]
+                                            val videoResource = format.videoData.firstOrNull()
+                                            val videoUrl = videoResource?.url ?: format.url
+                                            val mimeType = videoResource?.mimeType
+                                            
+                                            downloadId = DownloadHelper.enqueueDownload(
+                                                this@MainActivity, 
+                                                videoUrl, 
+                                                format.title,
+                                                null,
+                                                userAgentString,
+                                                mimeType
+                                            )
+                                            tvStatus.text = "Download started"
+                                        } else {
+                                            Log.e("Downloader", "No media formats found")
+                                            tvStatus.text = "Error: No video found at this link"
+                                            btnDownload.isEnabled = true
+                                        }
+                                    }
+                                    is Result.Failed -> {
+                                        Log.e("Downloader", "Extraction failed: ${result.error.message}")
+                                        if (result.error.message?.contains("safe analyse") == true) {
+                                            tvStatus.text = "Retrying with advanced extraction..."
+                                            extractWithWebView(resolvedUrl)
+                                        } else {
+                                            tvStatus.text = "Error: ${result.error.message}"
+                                            btnDownload.isEnabled = true
+                                        }
+                                    }
+                                    else -> {}
                                 }
-                            }
-                            is Result.Failed -> {
-                                tvStatus.text = "Error: ${result.error.message}"
-                                btnDownload.isEnabled = true
-                            }
-                            else -> {
-                                // Handle progress if needed
                             }
                         }
                     }
+                } else {
+                    Log.d("Downloader", "No extractor found, attempting direct download")
+                    downloadId = DownloadHelper.enqueueDownload(this@MainActivity, resolvedUrl, "Video", null, userAgentString)
+                    tvStatus.text = "Direct download started"
+                    btnDownload.isEnabled = true
                 }
             }
-        } else {
-            DownloadHelper.enqueueDownload(this, url)
+        }
+    }
+
+    private suspend fun resolveRedirects(url: String): String {
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                connection.instanceFollowRedirects = false
+                connection.connectTimeout = 5000
+                connection.readTimeout = 5000
+                connection.setRequestProperty("User-Agent", userAgentString)
+                
+                val responseCode = connection.responseCode
+                if (responseCode in 300..399) {
+                    val redirectUrl = connection.getHeaderField("Location")
+                    if (!redirectUrl.isNullOrEmpty()) {
+                        return@withContext resolveRedirects(redirectUrl)
+                    }
+                }
+                url
+            } catch (_: Exception) {
+                url
+            }
         }
     }
 
     private fun setupHiddenWebView() {
         hiddenWebView.settings.javaScriptEnabled = true
         hiddenWebView.settings.domStorageEnabled = true
-        hiddenWebView.settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36"
+        hiddenWebView.settings.userAgentString = userAgentString
         
         hiddenWebView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                Log.d("WebViewDetect", "Page finished: $url")
+                hiddenWebView.evaluateJavascript(
+                    "(function() { " +
+                    "  var vids = document.getElementsByTagName('video');" +
+                    "  if (vids.length > 0) { vids[0].play(); }" +
+                    "})();", null
+                )
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?
             ): WebResourceResponse? {
                 val url = request?.url.toString()
                 
-                // Common Pornhub video source patterns
-                if ((url.contains(".mp4") && !url.contains("adserv")) || 
-                    url.contains("get_media") || 
-                    (url.contains(".m3u8") && url.contains("master"))) {
-                    
+                // Detection patterns for various sites
+                val isVideo = (url.contains(".mp4") || 
+                             url.contains("video-h264") || 
+                             url.contains("tiktokcdn.com") ||
+                             url.contains("byteoversea.com") ||
+                             url.contains("ibyteimg.com") ||
+                             url.contains("p16-tiktok") ||
+                             url.contains("p77-tiktok") ||
+                             (url.contains(".m3u8") && url.contains("master")) ||
+                             url.contains("get_media")) &&
+                             !url.contains("placeholder", ignoreCase = true) &&
+                             !url.contains("loading", ignoreCase = true) &&
+                             !url.contains("adserv") &&
+                             !url.contains("analytics")
+
+                if (isVideo) {
                     runOnUiThread {
-                        if (btnDownload.isEnabled == false) {
+                        if (!btnDownload.isEnabled) {
+                            Log.d("WebViewDetect", "MATCHED VIDEO: $url")
                             tvStatus.text = "Video detected!"
-                            DownloadHelper.enqueueDownload(this@MainActivity, url, "Pornhub Video")
+                            val cookies = android.webkit.CookieManager.getInstance().getCookie(url)
+                            downloadId = DownloadHelper.enqueueDownload(
+                                this@MainActivity, 
+                                url, 
+                                "Downloaded Video", 
+                                cookies, 
+                                userAgentString,
+                                null
+                            )
                             btnDownload.isEnabled = true
-                            // Stop loading once we found the video
                             hiddenWebView.stopLoading()
                         }
                     }
@@ -292,17 +413,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun extractPornhubVideo(url: String) {
-        tvStatus.text = "Analyzing Pornhub page..."
+    private fun extractWithWebView(url: String) {
+        tvStatus.text = "Analyzing page content..."
         hiddenWebView.loadUrl(url)
         
-        // Timeout if not detected in 20 seconds
         lifecycleScope.launch {
-            kotlinx.coroutines.delay(20000)
+            kotlinx.coroutines.delay(30000)
             if (!btnDownload.isEnabled) {
                 runOnUiThread {
                     if (tvStatus.text.contains("Analyzing")) {
-                        tvStatus.text = "Extraction timed out"
+                        tvStatus.text = "Advanced extraction timed out"
                         btnDownload.isEnabled = true
                         hiddenWebView.stopLoading()
                     }
@@ -313,11 +433,30 @@ class MainActivity : AppCompatActivity() {
 
     private val onDownloadComplete = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
-            // Need a way to track downloadId across Helper and Activity if we want specific completion logic
-            // But for now, just enable the button
-            btnDownload.isEnabled = true
-            tvStatus.text = "Download Finished"
+            val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+            if (id == downloadId) {
+                btnDownload.isEnabled = true
+                
+                val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                val query = DownloadManager.Query().setFilterById(id)
+                val cursor = downloadManager.query(query)
+                
+                if (cursor.moveToFirst()) {
+                    val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                    val status = cursor.getInt(statusIndex)
+                    
+                    if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                        tvStatus.text = "Download Finished Successfully"
+                        Toast.makeText(context, "Download complete!", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val reasonIndex = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+                        val reason = cursor.getInt(reasonIndex)
+                        tvStatus.text = "Download Failed (Error: $reason)"
+                        Log.e("Downloader", "Download failed with reason: $reason")
+                    }
+                }
+                cursor.close()
+            }
         }
     }
 

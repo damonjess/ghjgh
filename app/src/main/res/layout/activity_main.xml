@@ -183,6 +183,6 @@
         android:id="@+id/hiddenWebView"
         android:layout_width="1dp"
         android:layout_height="1dp"
-        android:visibility="gone" />
+        android:visibility="visible" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
