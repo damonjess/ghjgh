@@ -142,13 +142,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isServiceRunning(serviceClass: Class<*>): Boolean {
-        val manager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-        for (service in manager.getRunningServices(Int.MAX_VALUE)) {
-            if (serviceClass.name == service.service.className) {
-                return true
+        return try {
+            val manager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            manager.getRunningServices(Int.MAX_VALUE).any {
+                it.service.className == serviceClass.name
             }
+        } catch (_: Exception) {
+            false
         }
-        return false
     }
 
     override fun onResume() {

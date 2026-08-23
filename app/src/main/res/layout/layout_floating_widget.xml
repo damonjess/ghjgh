@@ -3,16 +3,19 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root_container"
     android:layout_width="wrap_content"
-    android:layout_height="wrap_content">
+    android:layout_height="wrap_content"
+    android:clickable="true"
+    android:focusable="true">
 
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
+    <ImageView
         android:id="@+id/fab_floating"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_margin="8dp"
-        android:clickable="false"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:background="@drawable/bg_floating_circle"
+        android:padding="16dp"
+        android:src="@android:drawable/ic_menu_search"
+        app:tint="@android:color/white"
         android:contentDescription="Floating Download Button"
-        app:fabSize="mini"
-        app:srcCompat="@android:drawable/ic_menu_search" />
-
+        android:clickable="false"
+        android:focusable="false" />
 </FrameLayout>
